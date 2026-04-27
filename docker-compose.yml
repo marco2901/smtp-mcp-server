@@ -20,7 +20,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik
-      - traefik.http.routers.smtp-mcp.rule=Host(`smtp-mcp.biegel24.de`)
+      - traefik.http.routers.smtp-mcp.rule=Host(`${MCP_DOMAIN}`)
       - traefik.http.routers.smtp-mcp.entrypoints=websecure
       - traefik.http.services.smtp-mcp.loadbalancer.server.port=3000
       - traefik.http.routers.smtp-mcp.tls.certresolver=mydnschallenge
