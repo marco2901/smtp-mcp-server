@@ -1,0 +1,34 @@
+services:
+  smtp-mcp-server:
+    build: .
+    container_name: smtp-mcp-server
+    restart: unless-stopped
+    environment:
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - MCP_API_KEY=${MCP_API_KEY}
+      # Authelia OIDC – für Claude.ai OAuth
+      - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+    expose:
+      - "3000"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik
+      - traefik.http.routers.smtp-mcp.rule=Host(`smtp-mcp.biegel24.de`)
+      - traefik.http.routers.smtp-mcp.entrypoints=websecure
+      - traefik.http.services.smtp-mcp.loadbalancer.server.port=3000
+      - traefik.http.routers.smtp-mcp.tls.certresolver=mydnschallenge
+      - traefik.http.routers.smtp-mcp.tls=true
+      - traefik.http.routers.smtp-mcp.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
