@@ -30,43 +30,42 @@ An MCP (Model Context Protocol) server for sending emails via SMTP — designed 
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` with your values (see `.env.example` for all options):
 
 ```env
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
-SMTP_SECURE=false        # true for port 465 (SSL), false for STARTTLS
+SMTP_SECURE=false
 SMTP_USER=user@example.com
 SMTP_PASS=your-password
 SMTP_FROM=user@example.com
 
+MCP_DOMAIN=smtp-mcp.yourdomain.com
+
 MCP_API_KEY=your-secret-api-key
 
-# Optional: Authelia OIDC (for Claude.ai OAuth)
-OIDC_CLIENT_ID=smtp-mcp-client
+OIDC_CLIENT_ID=smtp-mcp
 OIDC_CLIENT_SECRET=your-oidc-secret
 ```
 
-### 2. Adjust Traefik hostname
-
-In `docker-compose.yml`, replace `smtp-mcp.yourdomain.com` with your actual domain.
-
-### 3. Start
+### 2. Start
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
+
+The image is pulled automatically from GHCR (`ghcr.io/marco2901/smtp-mcp-server:latest`). No local build needed.
 
 ## Authentication
 
-The server supports two auth mechanisms — they are checked in order:
+The server supports two auth mechanisms — checked in order:
 
-1. **Static Bearer token** (Claude Desktop / API clients)
+1. **Static Bearer token** (Claude Desktop / direct API clients)
    Set `MCP_API_KEY` and pass it as `Authorization: Bearer <key>`.
 
 2. **JWT via Authelia OIDC introspection** (Claude.ai)
-   Claude.ai obtains a JWT from Authelia via OAuth authorization code flow. The server validates it by calling Authelia's `/api/oidc/introspection` endpoint.
-   Requires `OIDC_INTROSPECTION_URL`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` to be set.
+   Claude.ai obtains a JWT from Authelia via OAuth authorization code flow. The server validates it against Authelia's `/api/oidc/introspection` endpoint.
+   Requires `OIDC_INTROSPECTION_URL`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET`.
 
 If `MCP_API_KEY` is not set, all requests are accepted without authentication.
 
@@ -77,15 +76,31 @@ In Claude.ai → Settings → Connectors → Add custom connector:
 | Field | Value |
 |-------|-------|
 | Name | SMTP Email |
-| Remote MCP Server URL | `https://smtp-mcp.yourdomain.com/mcp` |
+| Remote MCP Server URL | `https://<MCP_DOMAIN>/sse` |
 | OAuth Client ID | your `OIDC_CLIENT_ID` |
 | OAuth Client Secret | your `OIDC_CLIENT_SECRET` |
 
-> **Note:** Authelia must have an OAuth client registered for Claude.ai with the redirect URI `https://claude.ai/api/mcp/auth_callback`.
+> **Note:** Your Authelia instance must have an OAuth client registered with redirect URI `https://claude.ai/api/mcp/auth_callback`.
 
 ## Connecting to Claude Desktop
 
-In `claude_desktop_config.json`:
+Via HTTP (Docker):
+
+```json
+{
+  "mcpServers": {
+    "smtp-email": {
+      "type": "http",
+      "url": "https://<MCP_DOMAIN>/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-api-key"
+      }
+    }
+  }
+}
+```
+
+Via stdio (local):
 
 ```json
 {
@@ -99,22 +114,6 @@ In `claude_desktop_config.json`:
         "SMTP_USER": "user@example.com",
         "SMTP_PASS": "your-password",
         "SMTP_FROM": "user@example.com"
-      }
-    }
-  }
-}
-```
-
-Or via HTTP (if running in Docker):
-
-```json
-{
-  "mcpServers": {
-    "smtp-email": {
-      "type": "http",
-      "url": "https://smtp-mcp.yourdomain.com/mcp",
-      "headers": {
-        "Authorization": "Bearer your-secret-api-key"
       }
     }
   }
@@ -150,8 +149,8 @@ Endpoints exposed by the server:
 
 | Endpoint | Protocol | Description |
 |----------|----------|-------------|
-| `POST /mcp` | Streamable HTTP | Primary MCP endpoint (Claude.ai) |
-| `GET /sse` | Server-Sent Events | Legacy SSE transport |
+| `POST /mcp` | Streamable HTTP | Primary MCP endpoint |
+| `GET /sse` | Server-Sent Events | SSE transport (Claude.ai) |
 | `POST /messages` | HTTP | SSE message handler |
 
 ## License
