@@ -1,6 +1,6 @@
 services:
   smtp-mcp-server:
-    build: .
+    image: ghcr.io/marco2901/smtp-mcp-server:latest
     container_name: smtp-mcp-server
     restart: unless-stopped
     environment:
