@@ -69,7 +69,17 @@ MCP_API_KEY=your-secret-api-key
 
 OIDC_CLIENT_ID=mail-mcp
 OIDC_CLIENT_SECRET=your-oidc-secret
+
+# OAuth discovery for Claude.ai
+OAUTH_PUBLIC_BASE_URL=https://mail-mcp.yourdomain.com
+OIDC_ISSUER_URL=https://authelia.yourdomain.com
 ```
+
+> **Claude.ai OAuth:** when `OAUTH_PUBLIC_BASE_URL` and `OIDC_ISSUER_URL` are set,
+> the server publishes `/.well-known/oauth-protected-resource` and
+> `/.well-known/oauth-authorization-server` publicly and returns a
+> `WWW-Authenticate` header on 401, so Claude.ai discovers Authelia and runs the
+> authorization-code flow. Without them, only the static `MCP_API_KEY` Bearer works.
 
 Provider quick-reference:
 

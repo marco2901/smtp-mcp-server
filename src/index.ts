@@ -8,6 +8,7 @@ import express, { NextFunction, Request, Response } from "express";
 import { parseArgs } from "node:util";
 import { registerEmailTools } from "./tools/email";
 import { registerImapTools } from "./tools/imap";
+import { registerOAuthDiscovery, wwwAuthenticate, OAuthDiscoveryConfig } from "./oauth";
 const { version } = require("../package.json") as { version: string };
 
 const {
@@ -44,6 +45,22 @@ const oidcClientSecret = process.env.OIDC_CLIENT_SECRET || "";
 
 const smtpEnabled = Boolean(smtpHost && smtpUser && smtpPass);
 const imapEnabled = Boolean(imapHost && imapUser && imapPass);
+
+// OAuth discovery for Claude.ai: advertise Authelia as the authorization server
+// so the client can run the auth-code flow. Enabled only when both the public URL
+// and the issuer are configured.
+const publicBaseUrl = (process.env.OAUTH_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+const oidcIssuerUrl = (process.env.OIDC_ISSUER_URL || "").replace(/\/+$/, "");
+const oauthConfig: OAuthDiscoveryConfig | null =
+  publicBaseUrl && oidcIssuerUrl
+    ? {
+        publicBaseUrl,
+        issuerUrl: oidcIssuerUrl,
+        scopes: ["openid", "profile", "email", "offline_access"],
+        resourceName: "Mail MCP Server",
+        resourceDocumentation: "https://github.com/marco2901/smtp-mcp-server",
+      }
+    : null;
 
 if (!smtpEnabled && !imapEnabled) {
   console.error(
@@ -93,6 +110,10 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
     if (ok) {
       next();
     } else {
+      if (oauthConfig) {
+        res.set("WWW-Authenticate", wwwAuthenticate(oauthConfig));
+        res.set("Access-Control-Expose-Headers", "mcp-session-id, WWW-Authenticate");
+      }
       res.status(401).send("Unauthorized");
     }
   });
@@ -151,6 +172,11 @@ Always confirm the recipient and content with the user before sending.
     app.use(express.json());
 
     const sseTransports: Record<string, SSEServerTransport> = {};
+
+    // Public OAuth discovery endpoints — MUST be before the auth middleware.
+    if (oauthConfig) {
+      registerOAuthDiscovery(app, oauthConfig);
+    }
 
     app.use(authMiddleware);
 

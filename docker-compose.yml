@@ -23,6 +23,9 @@ services:
       - OIDC_INTROSPECTION_URL=https://authelia.your-domain.com/api/oidc/introspection
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      # OAuth-Discovery für Claude.ai (öffentliche /.well-known/oauth-* + WWW-Authenticate)
+      - OAUTH_PUBLIC_BASE_URL=https://${MCP_DOMAIN}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-https://authelia.your-domain.com}
     expose:
       - "3000"
     labels:
