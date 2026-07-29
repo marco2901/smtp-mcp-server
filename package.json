@@ -1,7 +1,7 @@
 {
   "name": "smtp-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for sending emails via SMTP",
+  "version": "1.1.0",
+  "description": "MCP server for reading (IMAP) and sending (SMTP) emails",
   "main": "build/index.js",
   "bin": {
     "smtp-mcp": "build/index.js"
@@ -18,12 +18,15 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.1",
     "express": "^5.1.0",
+    "imapflow": "^1.6.4",
+    "mailparser": "^3.9.14",
     "nodemailer": "^6.9.16",
     "typescript": "^5.8.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.2",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^24.0.0",
     "@types/nodemailer": "^6.4.17",
     "ts-node": "^10.9.2"

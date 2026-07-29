@@ -7,6 +7,7 @@ import express, { NextFunction, Request, Response } from "express";
 
 import { parseArgs } from "node:util";
 import { registerEmailTools } from "./tools/email";
+import { registerImapTools } from "./tools/imap";
 const { version } = require("../package.json") as { version: string };
 
 const {
@@ -28,13 +29,26 @@ const smtpUser = process.env.SMTP_USER || "";
 const smtpPass = process.env.SMTP_PASS || "";
 const smtpFrom = process.env.SMTP_FROM || smtpUser;
 
+// IMAP defaults to TLS on 993; falls back to the SMTP user/pass so a single
+// mailbox only needs one credential set when host/user are shared.
+const imapHost = process.env.IMAP_HOST || "";
+const imapPort = parseInt(process.env.IMAP_PORT || "993", 10);
+const imapSecure = process.env.IMAP_SECURE ? process.env.IMAP_SECURE === "true" : true;
+const imapUser = process.env.IMAP_USER || smtpUser;
+const imapPass = process.env.IMAP_PASS || smtpPass;
+
 const mcpApiKey = process.env.MCP_API_KEY || "";
 const oidcIntrospectionUrl = process.env.OIDC_INTROSPECTION_URL || "";
 const oidcClientId = process.env.OIDC_CLIENT_ID || "";
 const oidcClientSecret = process.env.OIDC_CLIENT_SECRET || "";
 
-if (!smtpHost || !smtpUser || !smtpPass) {
-  console.error("Missing required SMTP environment variables: SMTP_HOST, SMTP_USER, SMTP_PASS");
+const smtpEnabled = Boolean(smtpHost && smtpUser && smtpPass);
+const imapEnabled = Boolean(imapHost && imapUser && imapPass);
+
+if (!smtpEnabled && !imapEnabled) {
+  console.error(
+    "No mailbox configured. Set SMTP_HOST/SMTP_USER/SMTP_PASS (sending) and/or IMAP_HOST/IMAP_USER/IMAP_PASS (reading)."
+  );
   process.exit(1);
 }
 
@@ -86,31 +100,51 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
 
 async function main() {
   const server = new McpServer(
-    { name: "smtp-email", version },
+    { name: "email", version },
     {
       instructions: `
-SMTP Email MCP Server
+Email MCP Server (IMAP read + SMTP send)
 
-Use this server to send emails on behalf of the user.
+Use this server to read and send emails on behalf of the user.
 
-Available tools:
+Reading (IMAP)${imapEnabled ? "" : " — DISABLED (no IMAP config)"}:
+- list_emails: List the most recent emails in a mailbox (default INBOX)
+- read_email: Read the full content of a message by UID
+- search_emails: Search by sender, recipient, subject, body, date range, or unread state
+- list_folders: List all available mailboxes/folders
+- mark_as_read / mark_as_unread: Toggle the read state of a message
+- verify_imap_connection: Check that IMAP is reachable and credentials are valid
+
+Sending (SMTP)${smtpEnabled ? "" : " — DISABLED (no SMTP config)"}:
 - send_email: Send an email with subject, body (plain text and/or HTML), optional CC/BCC/Reply-To
-- verify_smtp_connection: Check that the SMTP server is reachable and credentials are valid
+- verify_smtp_connection: Check that SMTP is reachable and credentials are valid
 
-Default sender address: ${smtpFrom}
+${smtpEnabled ? `Default sender address: ${smtpFrom}\n` : ""}UIDs come from list_emails/search_emails and are stable per mailbox — pass them to read_email/mark_as_read.
 Always confirm the recipient and content with the user before sending.
       `.trim(),
     }
   );
 
-  registerEmailTools(server, {
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpSecure,
-    user: smtpUser,
-    pass: smtpPass,
-    from: smtpFrom,
-  });
+  if (smtpEnabled) {
+    registerEmailTools(server, {
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpSecure,
+      user: smtpUser,
+      pass: smtpPass,
+      from: smtpFrom,
+    });
+  }
+
+  if (imapEnabled) {
+    registerImapTools(server, {
+      host: imapHost,
+      port: imapPort,
+      secure: imapSecure,
+      user: imapUser,
+      pass: imapPass,
+    });
+  }
 
   if (useHttp) {
     const app = express();

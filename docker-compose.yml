@@ -10,9 +10,17 @@ services:
       - SMTP_USER=${SMTP_USER}
       - SMTP_PASS=${SMTP_PASS}
       - SMTP_FROM=${SMTP_FROM}
+      # IMAP (reading) — falls IMAP_USER/PASS leer, werden SMTP_USER/PASS genutzt
+      - IMAP_HOST=${IMAP_HOST}
+      - IMAP_PORT=${IMAP_PORT:-993}
+      - IMAP_SECURE=${IMAP_SECURE:-true}
+      - IMAP_USER=${IMAP_USER}
+      - IMAP_PASS=${IMAP_PASS}
       - MCP_API_KEY=${MCP_API_KEY}
       # Authelia OIDC – für Claude.ai OAuth
-      - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
+      # Authelia 4.39+: external HTTPS URL — internal http://authelia:9091
+      # is rejected because the X-Forwarded-Proto header is missing/'http'.
+      - OIDC_INTROSPECTION_URL=https://authelia.your-domain.com/api/oidc/introspection
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
     expose:
