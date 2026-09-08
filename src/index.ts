@@ -8,6 +8,7 @@ import express, { NextFunction, Request, Response } from "express";
 import { parseArgs } from "node:util";
 import { registerEmailTools } from "./tools/email";
 import { registerImapTools } from "./tools/imap";
+import { registerComposeTools } from "./tools/compose";
 import { registerOAuthDiscovery, wwwAuthenticate, OAuthDiscoveryConfig } from "./oauth";
 const { version } = require("../package.json") as { version: string };
 
@@ -137,10 +138,18 @@ Reading (IMAP)${imapEnabled ? "" : " — DISABLED (no IMAP config)"}:
 - verify_imap_connection: Check that IMAP is reachable and credentials are valid
 
 Sending (SMTP)${smtpEnabled ? "" : " — DISABLED (no SMTP config)"}:
-- send_email: Send an email with subject, body (plain text and/or HTML), optional CC/BCC/Reply-To
+- send_email: Send a NEW email (starts a new thread)
 - verify_smtp_connection: Check that SMTP is reachable and credentials are valid
 
-${smtpEnabled ? `Default sender address: ${smtpFrom}\n` : ""}UIDs come from list_emails/search_emails and are stable per mailbox — pass them to read_email/mark_as_read.
+Replying / forwarding${smtpEnabled && imapEnabled ? "" : " — DISABLED (needs both SMTP and IMAP)"}:
+- reply_email: Reply to a message by UID — keeps the thread and quotes the original (reply_all for all recipients)
+- forward_email: Forward a message by UID to new recipients, incl. original body + attachments
+- draft_email: Save a new draft to the Drafts folder without sending
+- send_draft: Send a previously saved draft by UID (then filed to Sent)
+
+reply_email/forward_email/draft_email SAVE A DRAFT by default — review it, then send with send_draft. Pass send=true to send in one step. Prefer reply_email over send_email when responding, so the recipient keeps the conversation history.
+
+${smtpEnabled ? `Default sender address: ${smtpFrom}\n` : ""}UIDs come from list_emails/search_emails and are stable per mailbox — pass them to read_email/reply_email/forward_email/mark_as_read.
 Always confirm the recipient and content with the user before sending.
       `.trim(),
     }
@@ -154,6 +163,27 @@ Always confirm the recipient and content with the user before sending.
       user: smtpUser,
       pass: smtpPass,
       from: smtpFrom,
+    });
+  }
+
+  // Reply / forward / draft need both reading (fetch original, save drafts) and sending.
+  if (smtpEnabled && imapEnabled) {
+    registerComposeTools(server, {
+      imap: {
+        host: imapHost,
+        port: imapPort,
+        secure: imapSecure,
+        user: imapUser,
+        pass: imapPass,
+      },
+      smtp: {
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpSecure,
+        user: smtpUser,
+        pass: smtpPass,
+        from: smtpFrom,
+      },
     });
   }
 

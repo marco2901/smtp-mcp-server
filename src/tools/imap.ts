@@ -16,7 +16,7 @@ export interface ImapConfig {
  * Connecting per call keeps things simple and avoids stale-socket issues —
  * MCP calls are infrequent enough that the connection overhead is negligible.
  */
-async function withClient<T>(
+export async function withClient<T>(
   config: ImapConfig,
   fn: (client: ImapFlow) => Promise<T>
 ): Promise<T> {

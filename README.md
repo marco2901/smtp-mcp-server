@@ -19,10 +19,21 @@ An MCP (Model Context Protocol) server for **reading (IMAP)** and **sending (SMT
 
 | Tool | Description |
 |------|-------------|
-| `send_email` | Send an email with subject, plain text and/or HTML body, optional CC/BCC/Reply-To |
+| `send_email` | Send a **new** email with subject, plain text and/or HTML body, optional CC/BCC/Reply-To |
 | `verify_smtp_connection` | Check that the SMTP server is reachable and credentials are valid |
 
-At least one of SMTP / IMAP must be configured. UIDs returned by `list_emails`/`search_emails` are stable per mailbox — pass them to `read_email`/`mark_as_read`.
+**Replying / forwarding / drafts** — enabled when **both** `SMTP_*` and `IMAP_*` are configured:
+
+| Tool | Description |
+|------|-------------|
+| `reply_email` | Reply to a message by UID — keeps the thread (`In-Reply-To`/`References`), quotes the original; `reply_all` for all recipients |
+| `forward_email` | Forward a message by UID to new recipients, including original body **and attachments** |
+| `draft_email` | Save a new draft to the Drafts folder without sending |
+| `send_draft` | Send a previously saved draft by UID, then file a copy to Sent and remove the draft |
+
+`reply_email`/`forward_email`/`draft_email` **save a draft by default** (IMAP `APPEND` to the auto-detected `\Drafts` folder) for review — then send it with `send_draft`. Pass `send=true` to send in one step; sent copies are filed to the `\Sent` folder.
+
+At least one of SMTP / IMAP must be configured. UIDs returned by `list_emails`/`search_emails` are stable per mailbox — pass them to `read_email`/`reply_email`/`forward_email`/`mark_as_read`.
 
 ### `send_email` parameters
 
