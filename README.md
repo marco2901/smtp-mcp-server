@@ -13,6 +13,8 @@ An MCP (Model Context Protocol) server for **reading (IMAP)** and **sending (SMT
 | `search_emails` | Search by sender, recipient, subject, body, date range, or unread state |
 | `list_folders` | List all available mailboxes/folders |
 | `mark_as_read` / `mark_as_unread` | Toggle a message's read state by UID |
+| `list_attachments` | List a message's attachments with a 1-based index |
+| `get_attachment` | Download an attachment by UID — returns a short-lived one-time HTTPS link (served from `GET /files/:token`) |
 | `verify_imap_connection` | Check that the IMAP server is reachable and credentials are valid |
 
 **Sending (SMTP)** — enabled when `SMTP_*` is configured:
@@ -32,6 +34,8 @@ An MCP (Model Context Protocol) server for **reading (IMAP)** and **sending (SMT
 | `send_draft` | Send a previously saved draft by UID, then file a copy to Sent and remove the draft |
 
 `reply_email`/`forward_email`/`draft_email` **save a draft by default** (IMAP `APPEND` to the auto-detected `\Drafts` folder) for review — then send it with `send_draft`. Pass `send=true` to send in one step; sent copies are filed to the `\Sent` folder.
+
+**Attachments.** `send_email`/`reply_email`/`forward_email`/`draft_email` accept an `attachments` array — each file as a `url` (the server fetches it; e.g. a Paperless or OneDrive share link) or as `content_base64`. To hand a file *out of* an email, use `get_attachment`, which returns a one-time download link rather than a raw blob (Claude.ai discards binary tool results). `get_attachment`/`list_attachments` and the `/files` route require `IMAP` plus `OAUTH_PUBLIC_BASE_URL`.
 
 At least one of SMTP / IMAP must be configured. UIDs returned by `list_emails`/`search_emails` are stable per mailbox — pass them to `read_email`/`reply_email`/`forward_email`/`mark_as_read`.
 
