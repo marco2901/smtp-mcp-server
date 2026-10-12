@@ -6,7 +6,8 @@ import { randomBytes } from "node:crypto";
 import { promises as fs, createReadStream } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ImapConfig, withClient } from "./imap";
+import { withClient } from "./imap";
+import type { Accounts, ImapConfig } from "../accounts";
 
 interface StoredFile {
   path: string;
@@ -46,16 +47,12 @@ export function registerAttachmentRoute(app: Express): void {
       return;
     }
     res.setHeader("Content-Type", f.contentType || "application/octet-stream");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${f.filename.replace(/"/g, "")}"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="${f.filename.replace(/"/g, "")}"`);
     const stream = createReadStream(f.path);
     stream.on("error", () => {
       if (!res.headersSent) res.status(500).send("Read error.");
     });
     stream.on("close", () => {
-      // one-time link: remove after the download completes
       store.delete(token);
       fs.unlink(f.path).catch(() => {});
     });
@@ -63,12 +60,16 @@ export function registerAttachmentRoute(app: Express): void {
   });
 }
 
+const account = z.string().optional().describe("Which mailbox the message is in (see tool description for ids).");
+
 const listSchema = z.object({
+  account,
   uid: z.number().describe("UID of the message (from list_emails/search_emails)"),
   mailbox: z.string().optional().describe("Mailbox the message is in (default: INBOX)"),
 });
 
 const getSchema = z.object({
+  account,
   uid: z.number().describe("UID of the message (from list_emails/search_emails)"),
   mailbox: z.string().optional().describe("Mailbox the message is in (default: INBOX)"),
   index: z
@@ -77,12 +78,6 @@ const getSchema = z.object({
     .describe("1-based attachment number from list_attachments. Omit if the mail has exactly one."),
   filename: z.string().optional().describe("Alternatively select the attachment by filename."),
 });
-
-export interface AttachmentToolsConfig {
-  imap: ImapConfig;
-  publicBaseUrl: string;
-  ttlMinutes?: number;
-}
 
 async function fetchAttachments(config: ImapConfig, mailbox: string, uid: number) {
   return withClient(config, async (client) => {
@@ -98,32 +93,43 @@ async function fetchAttachments(config: ImapConfig, mailbox: string, uid: number
   });
 }
 
-export function registerAttachmentTools(server: McpServer, cfg: AttachmentToolsConfig) {
-  const ttlMs = (cfg.ttlMinutes ?? 15) * 60 * 1000;
+export function registerAttachmentTools(server: McpServer, accounts: Accounts, publicBaseUrl: string, ttlMinutes = 15) {
+  const ttlMs = ttlMinutes * 60 * 1000;
+  const hint = accounts.hint();
+
+  const imapFor = (id?: string): ImapConfig | { error: string } => {
+    try {
+      return accounts.requireImap(id).imap;
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  };
 
   server.tool(
     "list_attachments",
-    "List the attachments of an email by UID (with a 1-based index for get_attachment).",
+    `List the attachments of an email by UID (with a 1-based index for get_attachment). ${hint}`,
     listSchema.shape,
-    async ({ uid, mailbox }: z.infer<typeof listSchema>) => {
+    async ({ account, uid, mailbox }: z.infer<typeof listSchema>) => {
+      const imap = imapFor(account);
+      if ("error" in imap) return textResult(imap.error);
       const box = mailbox || "INBOX";
-      const atts = await fetchAttachments(cfg.imap, box, uid);
+      const atts = await fetchAttachments(imap, box, uid);
       if (atts === null) return textResult(`Message UID ${uid} not found in "${box}".`);
       if (!atts.length) return textResult(`Message UID ${uid} has no attachments.`);
-      const lines = atts.map(
-        (a, i) => `${i + 1}. ${a.filename || "unnamed"} — ${a.contentType}, ${a.size} bytes`
-      );
+      const lines = atts.map((a, i) => `${i + 1}. ${a.filename || "unnamed"} — ${a.contentType}, ${a.size} bytes`);
       return textResult(`Attachments of UID ${uid}:\n\n${lines.join("\n")}`);
     }
   );
 
   server.tool(
     "get_attachment",
-    "Download an email attachment by UID — returns a short-lived (one-time) HTTPS link to the file. Select by index (from list_attachments) or filename.",
+    `Download an email attachment by UID — returns a short-lived one-time HTTPS link. Select by index (from list_attachments) or filename. ${hint}`,
     getSchema.shape,
-    async ({ uid, mailbox, index, filename }: z.infer<typeof getSchema>) => {
+    async ({ account, uid, mailbox, index, filename }: z.infer<typeof getSchema>) => {
+      const imap = imapFor(account);
+      if ("error" in imap) return textResult(imap.error);
       const box = mailbox || "INBOX";
-      const atts = await fetchAttachments(cfg.imap, box, uid);
+      const atts = await fetchAttachments(imap, box, uid);
       if (atts === null) return textResult(`Message UID ${uid} not found in "${box}".`);
       if (!atts.length) return textResult(`Message UID ${uid} has no attachments.`);
 
@@ -137,9 +143,7 @@ export function registerAttachmentTools(server: McpServer, cfg: AttachmentToolsC
       } else if (atts.length === 1) {
         att = atts[0];
       } else {
-        return textResult(
-          `Message has ${atts.length} attachments — specify index or filename (see list_attachments).`
-        );
+        return textResult(`Message has ${atts.length} attachments — specify index or filename (see list_attachments).`);
       }
 
       await purgeExpired();
@@ -155,7 +159,7 @@ export function registerAttachmentTools(server: McpServer, cfg: AttachmentToolsC
         expiresAt: Date.now() + ttlMs,
       });
 
-      const url = `${cfg.publicBaseUrl}/files/${token}`;
+      const url = `${publicBaseUrl}/files/${token}`;
       const mins = Math.round(ttlMs / 60000);
       return textResult(
         `Download link for "${att.filename || "attachment"}" (${att.contentType}, ${att.size} bytes):\n${url}\n\nOne-time link, valid ~${mins} min.`

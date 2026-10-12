@@ -2,14 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { z } from "zod/v3";
+import type { Accounts, ImapConfig } from "../accounts";
 
-export interface ImapConfig {
-  host: string;
-  port: number;
-  secure: boolean;
-  user: string;
-  pass: string;
-}
+export type { ImapConfig } from "../accounts";
 
 /**
  * Open a short-lived IMAP connection, run `fn`, then always log out.
@@ -43,6 +38,21 @@ function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
+/** Resolve the account's IMAP config and run fn, or return a readable error. */
+async function withAccountImap<T extends { content: unknown }>(
+  accounts: Accounts,
+  account: string | undefined,
+  fn: (client: ImapFlow) => Promise<T>
+): Promise<T | ReturnType<typeof textResult>> {
+  let imap: ImapConfig;
+  try {
+    imap = accounts.requireImap(account).imap;
+  } catch (e) {
+    return textResult((e as Error).message);
+  }
+  return withClient(imap, fn);
+}
+
 function formatAddress(addr: any): string {
   if (!addr) return "";
   const list = Array.isArray(addr) ? addr : [addr];
@@ -52,19 +62,24 @@ function formatAddress(addr: any): string {
     .join(", ");
 }
 
+const account = z.string().optional().describe("Which mailbox to use (see tool description for ids).");
+
 const listSchema = z.object({
+  account,
   mailbox: z.string().optional().describe("Mailbox/folder to list (default: INBOX)"),
   limit: z.number().optional().describe("Max number of most-recent messages to return (default: 20)"),
   unseen_only: z.boolean().optional().describe("Only return unread messages (default: false)"),
 });
 
 const readSchema = z.object({
+  account,
   uid: z.number().describe("The UID of the message to read (from list_emails/search_emails)"),
   mailbox: z.string().optional().describe("Mailbox/folder the message is in (default: INBOX)"),
   mark_seen: z.boolean().optional().describe("Mark the message as read when opening (default: false)"),
 });
 
 const searchSchema = z.object({
+  account,
   mailbox: z.string().optional().describe("Mailbox/folder to search (default: INBOX)"),
   from: z.string().optional().describe("Match sender address/name substring"),
   to: z.string().optional().describe("Match recipient address/name substring"),
@@ -77,11 +92,16 @@ const searchSchema = z.object({
 });
 
 const flagSchema = z.object({
+  account,
   uid: z.number().describe("The UID of the message"),
   mailbox: z.string().optional().describe("Mailbox/folder the message is in (default: INBOX)"),
 });
 
-export function registerImapTools(server: McpServer, config: ImapConfig) {
+const accountOnlySchema = z.object({ account });
+
+export function registerImapTools(server: McpServer, accounts: Accounts) {
+  const hint = accounts.hint();
+
   const summarize = (msg: any): string => {
     const env = msg.envelope || {};
     const flags: string[] = Array.isArray(msg.flags)
@@ -98,12 +118,12 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "list_emails",
-    "List the most recent emails in a mailbox (IMAP)",
+    `List the most recent emails in a mailbox (IMAP). ${hint}`,
     listSchema.shape,
-    async ({ mailbox, limit, unseen_only }: z.infer<typeof listSchema>) => {
+    async ({ account, mailbox, limit, unseen_only }: z.infer<typeof listSchema>) => {
       const box = mailbox || "INBOX";
       const max = limit ?? 20;
-      return withClient(config, async (client) => {
+      return withAccountImap(accounts, account, async (client) => {
         const lock = await client.getMailboxLock(box);
         try {
           let uids: number[];
@@ -113,7 +133,6 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
             const status = client.mailbox;
             const total = status && typeof status !== "boolean" ? status.exists : 0;
             if (!total) return textResult(`Mailbox "${box}" is empty.`);
-            // sequence range for the last `max` messages
             const startSeq = Math.max(1, total - max + 1);
             const seqUids: number[] = [];
             for await (const msg of client.fetch(`${startSeq}:*`, { uid: true })) {
@@ -130,7 +149,6 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
           )) {
             lines.push(summarize(msg));
           }
-          // fetch() returns in ascending order; restore newest-first
           lines.reverse();
           return textResult(
             `Mailbox "${box}" — ${lines.length} message(s), newest first:\n\n${lines.join("\n")}`
@@ -144,11 +162,11 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "read_email",
-    "Read the full content of an email by UID (IMAP)",
+    `Read the full content of an email by UID (IMAP). ${hint}`,
     readSchema.shape,
-    async ({ uid, mailbox, mark_seen }: z.infer<typeof readSchema>) => {
+    async ({ account, uid, mailbox, mark_seen }: z.infer<typeof readSchema>) => {
       const box = mailbox || "INBOX";
-      return withClient(config, async (client) => {
+      return withAccountImap(accounts, account, async (client) => {
         const lock = await client.getMailboxLock(box);
         try {
           const msg = await client.fetchOne(String(uid), { uid: true, source: true }, { uid: true });
@@ -180,12 +198,12 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "search_emails",
-    "Search emails by sender, subject, body, date range, or unread state (IMAP)",
+    `Search emails by sender, subject, body, date range, or unread state (IMAP). ${hint}`,
     searchSchema.shape,
     async (args: z.infer<typeof searchSchema>) => {
       const box = args.mailbox || "INBOX";
       const max = args.limit ?? 20;
-      return withClient(config, async (client) => {
+      return withAccountImap(accounts, args.account, async (client) => {
         const lock = await client.getMailboxLock(box);
         try {
           const query: Record<string, unknown> = {};
@@ -223,10 +241,10 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "list_folders",
-    "List all available IMAP mailboxes/folders",
-    {},
-    async () => {
-      return withClient(config, async (client) => {
+    `List all available IMAP mailboxes/folders. ${hint}`,
+    accountOnlySchema.shape,
+    async ({ account }: z.infer<typeof accountOnlySchema>) => {
+      return withAccountImap(accounts, account, async (client) => {
         const list = await client.list();
         const lines = list.map((m) => `${m.path}${m.subscribed ? "" : " (not subscribed)"}`);
         return textResult(`Mailboxes:\n\n${lines.join("\n")}`);
@@ -236,11 +254,11 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "mark_as_read",
-    "Mark an email as read (adds the \\Seen flag) by UID",
+    `Mark an email as read (adds the \\Seen flag) by UID. ${hint}`,
     flagSchema.shape,
-    async ({ uid, mailbox }: z.infer<typeof flagSchema>) => {
+    async ({ account, uid, mailbox }: z.infer<typeof flagSchema>) => {
       const box = mailbox || "INBOX";
-      return withClient(config, async (client) => {
+      return withAccountImap(accounts, account, async (client) => {
         const lock = await client.getMailboxLock(box);
         try {
           const ok = await client.messageFlagsAdd({ uid: String(uid) }, ["\\Seen"], { uid: true });
@@ -254,11 +272,11 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "mark_as_unread",
-    "Mark an email as unread (removes the \\Seen flag) by UID",
+    `Mark an email as unread (removes the \\Seen flag) by UID. ${hint}`,
     flagSchema.shape,
-    async ({ uid, mailbox }: z.infer<typeof flagSchema>) => {
+    async ({ account, uid, mailbox }: z.infer<typeof flagSchema>) => {
       const box = mailbox || "INBOX";
-      return withClient(config, async (client) => {
+      return withAccountImap(accounts, account, async (client) => {
         const lock = await client.getMailboxLock(box);
         try {
           const ok = await client.messageFlagsRemove({ uid: String(uid) }, ["\\Seen"], { uid: true });
@@ -272,17 +290,15 @@ export function registerImapTools(server: McpServer, config: ImapConfig) {
 
   server.tool(
     "verify_imap_connection",
-    "Verify that the IMAP connection is working",
-    {},
-    async () => {
-      return withClient(config, async (client) => {
+    `Verify that the IMAP connection is working. ${hint}`,
+    accountOnlySchema.shape,
+    async ({ account }: z.infer<typeof accountOnlySchema>) => {
+      return withAccountImap(accounts, account, async (client) => {
         const box = await client.getMailboxLock("INBOX");
         try {
           const status = client.mailbox;
           const exists = status && typeof status !== "boolean" ? status.exists : 0;
-          return textResult(
-            `IMAP connection verified.\nHost: ${config.host}:${config.port}\nUser: ${config.user}\nINBOX messages: ${exists}`
-          );
+          return textResult(`IMAP connection verified.\nINBOX messages: ${exists}`);
         } finally {
           box.release();
         }

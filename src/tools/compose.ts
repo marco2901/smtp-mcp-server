@@ -4,14 +4,9 @@ import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer";
 import { simpleParser } from "mailparser";
 import { z } from "zod/v3";
-import { ImapConfig, withClient } from "./imap";
-import { SmtpConfig } from "./email";
+import type { Accounts, Account, ImapConfig, SmtpConfig } from "../accounts";
+import { withClient } from "./imap";
 import { attachmentInputSchema, toNodemailerAttachments } from "../attach-input";
-
-export interface ComposeConfig {
-  imap: ImapConfig;
-  smtp: SmtpConfig;
-}
 
 type Addr = { address?: string; name?: string };
 
@@ -55,7 +50,6 @@ function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-/** Build the raw RFC822 bytes for a nodemailer mail object (for IMAP APPEND). */
 function buildRaw(mail: Record<string, unknown>): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     new MailComposer(mail).compile().build((err: Error | null, msg: Buffer) =>
@@ -64,16 +58,9 @@ function buildRaw(mail: Record<string, unknown>): Promise<Buffer> {
   });
 }
 
-/** Resolve a special-use folder (\Drafts, \Sent) by its IMAP attribute, with name fallbacks. */
-async function resolveFolder(
-  client: ImapFlow,
-  specialUse: string,
-  fallbacks: string[]
-): Promise<string> {
+async function resolveFolder(client: ImapFlow, specialUse: string, fallbacks: string[]): Promise<string> {
   const list = await client.list();
-  const byUse = list.find(
-    (m: any) => (m.specialUse || "").toLowerCase() === specialUse.toLowerCase()
-  );
+  const byUse = list.find((m: any) => (m.specialUse || "").toLowerCase() === specialUse.toLowerCase());
   if (byUse) return byUse.path;
   const lower = fallbacks.map((f) => f.toLowerCase());
   const byName = list.find((m: any) => {
@@ -86,7 +73,6 @@ async function resolveFolder(
 const DRAFT_FALLBACKS = ["Drafts", "Entwürfe", "Entwurf", "INBOX.Drafts"];
 const SENT_FALLBACKS = ["Sent", "Gesendet", "Sent Items", "Gesendete Objekte", "INBOX.Sent"];
 
-/** Fetch one message's raw source + parsed form from a mailbox by UID. */
 async function fetchParsed(client: ImapFlow, mailbox: string, uid: number) {
   const lock = await client.getMailboxLock(mailbox);
   try {
@@ -99,7 +85,10 @@ async function fetchParsed(client: ImapFlow, mailbox: string, uid: number) {
   }
 }
 
+const account = z.string().optional().describe("Which mailbox to act on (see tool description for ids).");
+
 const replySchema = z.object({
+  account,
   uid: z.number().describe("UID of the message to reply to (from list_emails/search_emails)"),
   body: z.string().describe("Your reply text. Inserted ABOVE the quoted original."),
   mailbox: z.string().optional().describe("Mailbox the original is in (default: INBOX)"),
@@ -112,6 +101,7 @@ const replySchema = z.object({
 });
 
 const forwardSchema = z.object({
+  account,
   uid: z.number().describe("UID of the message to forward"),
   to: z.string().describe("Recipient(s) to forward to (comma-separated)"),
   body: z.string().optional().describe("Your comment. Inserted ABOVE the forwarded original."),
@@ -123,6 +113,7 @@ const forwardSchema = z.object({
 });
 
 const draftSchema = z.object({
+  account,
   to: z.string().describe("Recipient email address (or comma-separated list)"),
   subject: z.string().describe("Email subject"),
   body: z.string().describe("Email body (plain text)"),
@@ -134,21 +125,44 @@ const draftSchema = z.object({
 });
 
 const sendDraftSchema = z.object({
+  account,
   uid: z.number().describe("UID of the draft to send (from list_emails on the Drafts folder)"),
   mailbox: z.string().optional().describe("Drafts mailbox (default: auto-detected \\Drafts folder)"),
 });
 
-export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
-  const transporter = nodemailer.createTransport({
-    host: cfg.smtp.host,
-    port: cfg.smtp.port,
-    secure: cfg.smtp.secure,
-    auth: { user: cfg.smtp.user, pass: cfg.smtp.pass },
-  });
-  const fromHeader = (name?: string) => (name ? `"${name}" <${cfg.smtp.from}>` : cfg.smtp.from);
-  const selfAddrs = new Set([cfg.smtp.user.toLowerCase(), cfg.smtp.from.toLowerCase()]);
+export function registerComposeTools(server: McpServer, accounts: Accounts) {
+  const hint = accounts.hint();
+  const transports = new Map<string, nodemailer.Transporter>();
+  const transportFor = (smtp: SmtpConfig, id: string) => {
+    if (!transports.has(id)) {
+      transports.set(
+        id,
+        nodemailer.createTransport({
+          host: smtp.host,
+          port: smtp.port,
+          secure: smtp.secure,
+          auth: { user: smtp.user, pass: smtp.pass },
+        })
+      );
+    }
+    return transports.get(id)!;
+  };
 
-  // Save a sent copy to the Sent folder (best-effort — never fail the send over this).
+  // Resolve an account that has BOTH imap and smtp; returns null + error text otherwise.
+  const resolveBoth = (
+    id?: string
+  ): { account: Account; imap: ImapConfig; smtp: SmtpConfig } | { error: string } => {
+    let acc: Account;
+    try {
+      acc = accounts.resolve(id);
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+    if (!acc.imap || !acc.smtp)
+      return { error: `Account "${acc.id}" needs both IMAP and SMTP for reply/forward/draft.` };
+    return { account: acc, imap: acc.imap, smtp: acc.smtp };
+  };
+
   const saveToSent = async (client: ImapFlow, raw: Buffer) => {
     try {
       const sent = await resolveFolder(client, "\\Sent", SENT_FALLBACKS);
@@ -160,19 +174,23 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
 
   server.tool(
     "reply_email",
-    "Reply to an email by UID — preserves the thread (In-Reply-To/References) and quotes the original. Saves a draft by default; pass send=true to send immediately.",
+    `Reply to an email by UID — preserves the thread and quotes the original. Saves a draft by default; send=true sends now. ${hint}`,
     replySchema.shape,
-    async ({ uid, body, mailbox, reply_all, send, to, cc, from_name, attachments }: z.infer<typeof replySchema>) => {
-      const box = mailbox || "INBOX";
-      return withClient(cfg.imap, async (client) => {
-        const orig = await fetchParsed(client, box, uid);
-        if (!orig) return textResult(`Message UID ${uid} not found in "${box}".`);
+    async (args: z.infer<typeof replySchema>) => {
+      const r = resolveBoth(args.account);
+      if ("error" in r) return textResult(r.error);
+      const { imap, smtp } = r;
+      const selfAddrs = new Set([smtp.user.toLowerCase(), smtp.from.toLowerCase()]);
+      const box = args.mailbox || "INBOX";
+      return withClient(imap, async (client) => {
+        const orig = await fetchParsed(client, box, args.uid);
+        if (!orig) return textResult(`Message UID ${args.uid} not found in "${box}".`);
         const p = orig.parsed as any;
 
-        const toRec = to || addrString(addrList(p.from));
+        const toRec = args.to || addrString(addrList(p.from));
         const ccRec =
-          cc ||
-          (reply_all
+          args.cc ||
+          (args.reply_all
             ? addrString(
                 [...addrList(p.to), ...addrList(p.cc)].filter(
                   (a) => !selfAddrs.has((a.address || "").toLowerCase())
@@ -186,42 +204,43 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
         ].filter(Boolean);
 
         const mail: Record<string, unknown> = {
-          from: fromHeader(from_name),
+          from: args.from_name ? `"${args.from_name}" <${smtp.from}>` : smtp.from,
           to: toRec,
           cc: ccRec,
           subject,
           inReplyTo: p.messageId,
           references: refs.join(" "),
-          text: `${body}\n\n${quoteOriginal(p)}`,
-          attachments: toNodemailerAttachments(attachments),
+          text: `${args.body}\n\n${quoteOriginal(p)}`,
+          attachments: toNodemailerAttachments(args.attachments),
         };
 
-        if (send) {
-          const info = await transporter.sendMail(mail);
+        if (args.send) {
+          const info = await transportFor(smtp, r.account.id).sendMail(mail);
           await saveToSent(client, await buildRaw(mail));
           return textResult(
-            `Reply sent to ${toRec}${ccRec ? ` (cc ${ccRec})` : ""}.\nMessage ID: ${info.messageId}`
+            `Reply sent from ${r.account.id} to ${toRec}${ccRec ? ` (cc ${ccRec})` : ""}.\nMessage ID: ${info.messageId}`
           );
         }
         const drafts = await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS);
         const res = await client.append(drafts, await buildRaw(mail), ["\\Draft"]);
         const uidInfo = res && (res as any).uid ? ` (UID ${(res as any).uid})` : "";
-        return textResult(
-          `Reply draft saved to "${drafts}"${uidInfo}. Review it, then send with send_draft.`
-        );
+        return textResult(`Reply draft saved to "${drafts}"${uidInfo}. Review it, then send with send_draft.`);
       });
     }
   );
 
   server.tool(
     "forward_email",
-    "Forward an email by UID to new recipients, including the original body and attachments. Saves a draft by default; pass send=true to send immediately.",
+    `Forward an email by UID, including the original body and attachments. Saves a draft by default; send=true sends now. ${hint}`,
     forwardSchema.shape,
-    async ({ uid, to, body, mailbox, send, cc, from_name, attachments }: z.infer<typeof forwardSchema>) => {
-      const box = mailbox || "INBOX";
-      return withClient(cfg.imap, async (client) => {
-        const orig = await fetchParsed(client, box, uid);
-        if (!orig) return textResult(`Message UID ${uid} not found in "${box}".`);
+    async (args: z.infer<typeof forwardSchema>) => {
+      const r = resolveBoth(args.account);
+      if ("error" in r) return textResult(r.error);
+      const { imap, smtp } = r;
+      const box = args.mailbox || "INBOX";
+      return withClient(imap, async (client) => {
+        const orig = await fetchParsed(client, box, args.uid);
+        if (!orig) return textResult(`Message UID ${args.uid} not found in "${box}".`);
         const p = orig.parsed as any;
 
         const subject = /^fwd?:/i.test(p.subject || "") ? p.subject : `Fwd: ${p.subject || ""}`;
@@ -236,48 +255,49 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
           content: a.content,
           contentType: a.contentType,
         }));
-        const extraAttachments = toNodemailerAttachments(attachments) || [];
+        const extraAttachments = toNodemailerAttachments(args.attachments) || [];
 
         const mail: Record<string, unknown> = {
-          from: fromHeader(from_name),
-          to,
-          cc,
+          from: args.from_name ? `"${args.from_name}" <${smtp.from}>` : smtp.from,
+          to: args.to,
+          cc: args.cc,
           subject,
           references: [p.references, p.messageId].flat().filter(Boolean).join(" "),
-          text: `${body ? body + "\n\n" : ""}${header}${p.text || (p.html ? stripHtml(p.html) : "")}`,
+          text: `${args.body ? args.body + "\n\n" : ""}${header}${p.text || (p.html ? stripHtml(p.html) : "")}`,
           attachments: [...originalAttachments, ...extraAttachments],
         };
 
-        if (send) {
-          const info = await transporter.sendMail(mail);
+        if (args.send) {
+          const info = await transportFor(smtp, r.account.id).sendMail(mail);
           await saveToSent(client, await buildRaw(mail));
-          return textResult(`Forwarded to ${to}.\nMessage ID: ${info.messageId}`);
+          return textResult(`Forwarded from ${r.account.id} to ${args.to}.\nMessage ID: ${info.messageId}`);
         }
         const drafts = await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS);
         const res = await client.append(drafts, await buildRaw(mail), ["\\Draft"]);
         const uidInfo = res && (res as any).uid ? ` (UID ${(res as any).uid})` : "";
-        return textResult(
-          `Forward draft saved to "${drafts}"${uidInfo}. Review it, then send with send_draft.`
-        );
+        return textResult(`Forward draft saved to "${drafts}"${uidInfo}. Review it, then send with send_draft.`);
       });
     }
   );
 
   server.tool(
     "draft_email",
-    "Create and save a new email draft to the Drafts folder (does not send). Send it later with send_draft.",
+    `Create and save a new email draft to the Drafts folder (does not send). ${hint}`,
     draftSchema.shape,
-    async ({ to, subject, body, html, cc, bcc, from_name, attachments }: z.infer<typeof draftSchema>) => {
-      return withClient(cfg.imap, async (client) => {
+    async (args: z.infer<typeof draftSchema>) => {
+      const r = resolveBoth(args.account);
+      if ("error" in r) return textResult(r.error);
+      const { imap, smtp } = r;
+      return withClient(imap, async (client) => {
         const mail: Record<string, unknown> = {
-          from: fromHeader(from_name),
-          to,
-          cc,
-          bcc,
-          subject,
-          text: body,
-          html,
-          attachments: toNodemailerAttachments(attachments),
+          from: args.from_name ? `"${args.from_name}" <${smtp.from}>` : smtp.from,
+          to: args.to,
+          cc: args.cc,
+          bcc: args.bcc,
+          subject: args.subject,
+          text: args.body,
+          html: args.html,
+          attachments: toNodemailerAttachments(args.attachments),
         };
         const drafts = await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS);
         const res = await client.append(drafts, await buildRaw(mail), ["\\Draft"]);
@@ -289,31 +309,34 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
 
   server.tool(
     "send_draft",
-    "Send an existing draft by UID (from the Drafts folder), then move a copy to Sent and remove the draft. Threading of reply/forward drafts is preserved.",
+    `Send an existing draft by UID, then move a copy to Sent and remove the draft. ${hint}`,
     sendDraftSchema.shape,
-    async ({ uid, mailbox }: z.infer<typeof sendDraftSchema>) => {
-      return withClient(cfg.imap, async (client) => {
-        const box = mailbox || (await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS));
-        const draft = await fetchParsed(client, box, uid);
-        if (!draft) return textResult(`Draft UID ${uid} not found in "${box}".`);
+    async (args: z.infer<typeof sendDraftSchema>) => {
+      const r = resolveBoth(args.account);
+      if ("error" in r) return textResult(r.error);
+      const { imap, smtp } = r;
+      return withClient(imap, async (client) => {
+        const box = args.mailbox || (await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS));
+        const draft = await fetchParsed(client, box, args.uid);
+        if (!draft) return textResult(`Draft UID ${args.uid} not found in "${box}".`);
         const p = draft.parsed as any;
         const rcpt = [...addrList(p.to), ...addrList(p.cc), ...addrList(p.bcc)]
           .map((a) => a.address)
           .filter(Boolean) as string[];
-        if (!rcpt.length) return textResult(`Draft UID ${uid} has no recipients — not sent.`);
+        if (!rcpt.length) return textResult(`Draft UID ${args.uid} has no recipients — not sent.`);
 
-        const info = await transporter.sendMail({
-          envelope: { from: cfg.smtp.from, to: rcpt },
+        const info = await transportFor(smtp, r.account.id).sendMail({
+          envelope: { from: smtp.from, to: rcpt },
           raw: draft.source,
         });
         await saveToSent(client, draft.source);
         const lock = await client.getMailboxLock(box);
         try {
-          await client.messageDelete(String(uid), { uid: true });
+          await client.messageDelete(String(args.uid), { uid: true });
         } finally {
           lock.release();
         }
-        return textResult(`Draft sent to ${rcpt.join(", ")}.\nMessage ID: ${info.messageId}`);
+        return textResult(`Draft sent from ${r.account.id} to ${rcpt.join(", ")}.\nMessage ID: ${info.messageId}`);
       });
     }
   );

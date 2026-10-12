@@ -1,18 +1,29 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import nodemailer from "nodemailer";
 import { z } from "zod/v3";
+import type { Accounts, SmtpConfig } from "../accounts";
 import { attachmentInputSchema, toNodemailerAttachments } from "../attach-input";
 
-export interface SmtpConfig {
-  host: string;
-  port: number;
-  secure: boolean;
-  user: string;
-  pass: string;
-  from: string;
+export type { SmtpConfig } from "../accounts";
+
+/** A cached nodemailer transporter per account id. */
+export function makeTransport(smtp: SmtpConfig) {
+  return nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: { user: smtp.user, pass: smtp.pass },
+  });
 }
 
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+const account = z.string().optional().describe("Which mailbox to send from (see tool description for ids).");
+
 const sendEmailSchema = z.object({
+  account,
   to: z.string().describe("Recipient email address (or comma-separated list)"),
   subject: z.string().describe("Email subject"),
   body: z.string().describe("Email body (plain text)"),
@@ -24,65 +35,62 @@ const sendEmailSchema = z.object({
   attachments: attachmentInputSchema,
 });
 
-type SendEmailInput = z.infer<typeof sendEmailSchema>;
+const verifySchema = z.object({ account });
 
-export function registerEmailTools(server: McpServer, config: SmtpConfig) {
-  const transporter = nodemailer.createTransport({
-    host: config.host,
-    port: config.port,
-    secure: config.secure,
-    auth: {
-      user: config.user,
-      pass: config.pass,
-    },
-  });
+export function registerEmailTools(server: McpServer, accounts: Accounts) {
+  const hint = accounts.hint();
+  const transports = new Map<string, nodemailer.Transporter>();
+  const transportFor = (acc: { id: string; smtp?: SmtpConfig }) => {
+    if (!transports.has(acc.id)) transports.set(acc.id, makeTransport(acc.smtp!));
+    return transports.get(acc.id)!;
+  };
 
   server.tool(
     "send_email",
-    "Send an email via SMTP",
+    `Send a new email via SMTP (starts a new thread). ${hint}`,
     sendEmailSchema.shape,
-    async ({ to, subject, body, html, cc, bcc, reply_to, from_name, attachments }: SendEmailInput) => {
-      const from = from_name
-        ? `"${from_name}" <${config.from}>`
-        : config.from;
-
-      const info = await transporter.sendMail({
+    async (args: z.infer<typeof sendEmailSchema>) => {
+      let acc, smtp;
+      try {
+        ({ account: acc, smtp } = accounts.requireSmtp(args.account));
+      } catch (e) {
+        return textResult((e as Error).message);
+      }
+      const from = args.from_name ? `"${args.from_name}" <${smtp.from}>` : smtp.from;
+      const info = await transportFor(acc).sendMail({
         from,
-        to,
-        cc,
-        bcc,
-        replyTo: reply_to,
-        subject,
-        text: body,
-        html,
-        attachments: toNodemailerAttachments(attachments),
+        to: args.to,
+        cc: args.cc,
+        bcc: args.bcc,
+        replyTo: args.reply_to,
+        subject: args.subject,
+        text: args.body,
+        html: args.html,
+        attachments: toNodemailerAttachments(args.attachments),
       });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Email sent successfully.\nMessage ID: ${info.messageId}\nAccepted: ${info.accepted?.join(", ") || to}\nRejected: ${info.rejected?.length ? info.rejected.join(", ") : "none"}`,
-          },
-        ],
-      };
+      return textResult(
+        `Email sent from ${acc.id} (${smtp.from}).\nMessage ID: ${info.messageId}\nAccepted: ${
+          info.accepted?.join(", ") || args.to
+        }\nRejected: ${info.rejected?.length ? info.rejected.join(", ") : "none"}`
+      );
     }
   );
 
   server.tool(
     "verify_smtp_connection",
-    "Verify that the SMTP connection is working",
-    {},
-    async () => {
-      await transporter.verify();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `SMTP connection verified successfully.\nHost: ${config.host}:${config.port}\nUser: ${config.user}\nFrom: ${config.from}`,
-          },
-        ],
-      };
+    `Verify that the SMTP connection is working. ${hint}`,
+    verifySchema.shape,
+    async ({ account }: z.infer<typeof verifySchema>) => {
+      let acc, smtp;
+      try {
+        ({ account: acc, smtp } = accounts.requireSmtp(account));
+      } catch (e) {
+        return textResult((e as Error).message);
+      }
+      await transportFor(acc).verify();
+      return textResult(
+        `SMTP connection verified for ${acc.id}.\nHost: ${smtp.host}:${smtp.port}\nFrom: ${smtp.from}`
+      );
     }
   );
 }

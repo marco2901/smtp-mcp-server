@@ -11,6 +11,7 @@ import { registerImapTools } from "./tools/imap";
 import { registerComposeTools } from "./tools/compose";
 import { registerAttachmentTools, registerAttachmentRoute } from "./tools/attachments";
 import { registerOAuthDiscovery, wwwAuthenticate, OAuthDiscoveryConfig } from "./oauth";
+import { parseAccounts } from "./accounts";
 const { version } = require("../package.json") as { version: string };
 
 const {
@@ -25,28 +26,16 @@ const {
 
 const resolvedPort = port ? parseInt(port, 10) : 3000;
 
-const smtpHost = process.env.SMTP_HOST || "";
-const smtpPort = parseInt(process.env.SMTP_PORT || "587", 10);
-const smtpSecure = process.env.SMTP_SECURE === "true";
-const smtpUser = process.env.SMTP_USER || "";
-const smtpPass = process.env.SMTP_PASS || "";
-const smtpFrom = process.env.SMTP_FROM || smtpUser;
-
-// IMAP defaults to TLS on 993; falls back to the SMTP user/pass so a single
-// mailbox only needs one credential set when host/user are shared.
-const imapHost = process.env.IMAP_HOST || "";
-const imapPort = parseInt(process.env.IMAP_PORT || "993", 10);
-const imapSecure = process.env.IMAP_SECURE ? process.env.IMAP_SECURE === "true" : true;
-const imapUser = process.env.IMAP_USER || smtpUser;
-const imapPass = process.env.IMAP_PASS || smtpPass;
+// One or more mailboxes, from MAIL_ACCOUNTS (JSON) or the legacy flat SMTP_*/IMAP_* env.
+const accounts = parseAccounts(process.env);
+const anyImap = accounts.some((a) => !!a.imap);
+const anySmtp = accounts.some((a) => !!a.smtp);
+const anyBoth = accounts.some((a) => !!a.imap && !!a.smtp);
 
 const mcpApiKey = process.env.MCP_API_KEY || "";
 const oidcIntrospectionUrl = process.env.OIDC_INTROSPECTION_URL || "";
 const oidcClientId = process.env.OIDC_CLIENT_ID || "";
 const oidcClientSecret = process.env.OIDC_CLIENT_SECRET || "";
-
-const smtpEnabled = Boolean(smtpHost && smtpUser && smtpPass);
-const imapEnabled = Boolean(imapHost && imapUser && imapPass);
 
 // OAuth discovery for Claude.ai: advertise Authelia as the authorization server
 // so the client can run the auth-code flow. Enabled only when both the public URL
@@ -64,9 +53,9 @@ const oauthConfig: OAuthDiscoveryConfig | null =
       }
     : null;
 
-if (!smtpEnabled && !imapEnabled) {
+if (!accounts.list.length) {
   console.error(
-    "No mailbox configured. Set SMTP_HOST/SMTP_USER/SMTP_PASS (sending) and/or IMAP_HOST/IMAP_USER/IMAP_PASS (reading)."
+    "No mailbox configured. Set MAIL_ACCOUNTS (JSON) or the flat SMTP_*/IMAP_* variables."
   );
   process.exit(1);
 }
@@ -122,76 +111,58 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
 }
 
 async function main() {
+  const accountList = accounts.list
+    .map((a) => `- ${a.id}: ${a.label}${a.imap ? " [read]" : ""}${a.smtp ? " [send]" : ""}`)
+    .join("\n");
+
   const server = new McpServer(
     { name: "email", version },
     {
       instructions: `
-Email MCP Server (IMAP read + SMTP send)
+Email MCP Server (IMAP read + SMTP send), multi-mailbox.
 
-Use this server to read and send emails on behalf of the user.
+This server serves several mailboxes. EVERY tool takes an "account" parameter —
+pass one of the ids below. If omitted, the default "${accounts.defaultId}" is used.
+Confirm which mailbox when it is ambiguous.
 
-Reading (IMAP)${imapEnabled ? "" : " — DISABLED (no IMAP config)"}:
-- list_emails: List the most recent emails in a mailbox (default INBOX)
-- read_email: Read the full content of a message by UID
-- search_emails: Search by sender, recipient, subject, body, date range, or unread state
-- list_folders: List all available mailboxes/folders
-- mark_as_read / mark_as_unread: Toggle the read state of a message
-- list_attachments: List a message's attachments (with an index)
-- get_attachment: Download an attachment by UID — returns a short-lived one-time HTTPS link
-- verify_imap_connection: Check that IMAP is reachable and credentials are valid
+Mailboxes:
+${accountList}
 
-Sending (SMTP)${smtpEnabled ? "" : " — DISABLED (no SMTP config)"}:
-- send_email: Send a NEW email (starts a new thread)
-- verify_smtp_connection: Check that SMTP is reachable and credentials are valid
+Reading (IMAP): list_emails, read_email, search_emails, list_folders,
+mark_as_read / mark_as_unread, list_attachments, get_attachment, verify_imap_connection.
+Sending (SMTP): send_email (new thread), verify_smtp_connection.
+Replying: reply_email (threaded, quotes original; reply_all), forward_email (incl. body + attachments),
+draft_email (save draft), send_draft (send a saved draft).
 
-Replying / forwarding${smtpEnabled && imapEnabled ? "" : " — DISABLED (needs both SMTP and IMAP)"}:
-- reply_email: Reply to a message by UID — keeps the thread and quotes the original (reply_all for all recipients)
-- forward_email: Forward a message by UID to new recipients, incl. original body + attachments
-- draft_email: Save a new draft to the Drafts folder without sending
-- send_draft: Send a previously saved draft by UID (then filed to Sent)
+reply_email/forward_email/draft_email SAVE A DRAFT by default — review it, then send with send_draft.
+Pass send=true to send in one step. Prefer reply_email over send_email when responding.
 
-reply_email/forward_email/draft_email SAVE A DRAFT by default — review it, then send with send_draft. Pass send=true to send in one step. Prefer reply_email over send_email when responding, so the recipient keeps the conversation history.
+Attachments: send/reply/forward/draft accept an "attachments" array — each file as a URL (preferred,
+e.g. a Paperless or OneDrive link) or as base64. To hand the user a file FROM an email, use
+get_attachment (returns a one-time download link).
 
-Attachments: send_email/reply_email/forward_email/draft_email accept an "attachments" array; give each file as a URL (preferred — e.g. a Paperless or OneDrive link) or as base64. To hand the user a file FROM an email, use get_attachment (returns a one-time download link).
-
-${smtpEnabled ? `Default sender address: ${smtpFrom}\n` : ""}UIDs come from list_emails/search_emails and are stable per mailbox — pass them to read_email/reply_email/forward_email/mark_as_read.
+UIDs come from list_emails/search_emails and are stable per mailbox+account.
 Always confirm the recipient and content with the user before sending.
       `.trim(),
     }
   );
 
-  const smtpCfg = {
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpSecure,
-    user: smtpUser,
-    pass: smtpPass,
-    from: smtpFrom,
-  };
-  const imapCfg = {
-    host: imapHost,
-    port: imapPort,
-    secure: imapSecure,
-    user: imapUser,
-    pass: imapPass,
-  };
-
-  if (smtpEnabled) {
-    registerEmailTools(server, smtpCfg);
+  if (anySmtp) {
+    registerEmailTools(server, accounts);
   }
 
   // Reply / forward / draft need both reading (fetch original, save drafts) and sending.
-  if (smtpEnabled && imapEnabled) {
-    registerComposeTools(server, { imap: imapCfg, smtp: smtpCfg });
+  if (anyBoth) {
+    registerComposeTools(server, accounts);
   }
 
   // Attachment download tools need a public base URL to hand out download links.
-  if (imapEnabled && publicBaseUrl) {
-    registerAttachmentTools(server, { imap: imapCfg, publicBaseUrl });
+  if (anyImap && publicBaseUrl) {
+    registerAttachmentTools(server, accounts, publicBaseUrl);
   }
 
-  if (imapEnabled) {
-    registerImapTools(server, imapCfg);
+  if (anyImap) {
+    registerImapTools(server, accounts);
   }
 
   if (useHttp) {
@@ -207,7 +178,7 @@ Always confirm the recipient and content with the user before sending.
 
     // Public one-time attachment download links — also before the auth middleware
     // (the token in the URL is the capability; Claude.ai/browsers fetch it unauthenticated).
-    if (imapEnabled && publicBaseUrl) {
+    if (anyImap && publicBaseUrl) {
       registerAttachmentRoute(app);
     }
 

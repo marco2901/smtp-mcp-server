@@ -4,6 +4,10 @@ services:
     container_name: smtp-mcp-server
     restart: unless-stopped
     environment:
+      # Multi-mailbox (preferred): a JSON array of accounts. If set, the flat
+      # SMTP_*/IMAP_* below are ignored. See .env.example for the shape.
+      - MAIL_ACCOUNTS=${MAIL_ACCOUNTS:-}
+      - DEFAULT_MAIL_ACCOUNT=${DEFAULT_MAIL_ACCOUNT:-}
       - SMTP_HOST=${SMTP_HOST}
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_SECURE=${SMTP_SECURE:-false}

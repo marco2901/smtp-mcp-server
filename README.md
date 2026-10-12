@@ -39,6 +39,10 @@ An MCP (Model Context Protocol) server for **reading (IMAP)** and **sending (SMT
 
 At least one of SMTP / IMAP must be configured. UIDs returned by `list_emails`/`search_emails` are stable per mailbox — pass them to `read_email`/`reply_email`/`forward_email`/`mark_as_read`.
 
+### Multiple mailboxes
+
+Set `MAIL_ACCOUNTS` to a JSON array to serve several mailboxes from one server (see `.env.example`). Every tool then takes an `account` parameter (the account `id`); omit it to use `DEFAULT_MAIL_ACCOUNT` (or the first account). Without `MAIL_ACCOUNTS`, the flat `SMTP_*`/`IMAP_*` variables define a single `default` account (backwards-compatible).
+
 ### `send_email` parameters
 
 | Parameter | Required | Description |
