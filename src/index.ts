@@ -130,6 +130,8 @@ ${accountList}
 
 Reading (IMAP): list_emails, read_email, search_emails, list_folders,
 mark_as_read / mark_as_unread, list_attachments, get_attachment, verify_imap_connection.
+Organizing (IMAP): move_emails (to a folder or alias: inbox, archive, trash, junk), delete_emails
+(moves to Trash; permanent=true deletes for good — confirm first), create_folder.
 Sending (SMTP): send_email (new thread), verify_smtp_connection.
 Replying: reply_email (threaded, quotes original; reply_all), forward_email (incl. body + attachments),
 draft_email (save draft), send_draft (send a saved draft).

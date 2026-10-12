@@ -99,6 +99,65 @@ const flagSchema = z.object({
 
 const accountOnlySchema = z.object({ account });
 
+const moveSchema = z.object({
+  account,
+  uids: z.array(z.number()).describe("UIDs of the messages to move (from list_emails/search_emails)"),
+  mailbox: z.string().optional().describe("Source mailbox (default: INBOX)"),
+  destination: z
+    .string()
+    .describe("Target folder: a path from list_folders, or one of inbox, archive, trash, junk, sent, drafts"),
+});
+
+const deleteSchema = z.object({
+  account,
+  uids: z.array(z.number()).describe("UIDs of the messages to delete (from list_emails/search_emails)"),
+  mailbox: z.string().optional().describe("Mailbox the messages are in (default: INBOX)"),
+  permanent: z
+    .boolean()
+    .optional()
+    .describe("true = delete for good (cannot be undone). Default false = move to the Trash folder."),
+});
+
+const createFolderSchema = z.object({
+  account,
+  path: z.string().describe("Folder to create, e.g. 'Rechnungen' (the server's namespace prefix is added if needed)"),
+});
+
+// Aliases resolved via the folder's IMAP special-use flag, so they work across
+// providers (IONOS "Papierkorb", T-Online "INBOX.Trash", ...).
+const SPECIAL_USE: Record<string, string> = {
+  inbox: "\\Inbox",
+  archive: "\\Archive",
+  archiv: "\\Archive",
+  trash: "\\Trash",
+  papierkorb: "\\Trash",
+  junk: "\\Junk",
+  spam: "\\Junk",
+  sent: "\\Sent",
+  gesendet: "\\Sent",
+  drafts: "\\Drafts",
+  "entwürfe": "\\Drafts",
+};
+
+/** Resolve a folder name or alias to its real path; null if it doesn't exist. */
+async function resolveMailbox(client: ImapFlow, name: string): Promise<string | null> {
+  const list = await client.list();
+  const lower = name.toLowerCase();
+  const use = SPECIAL_USE[lower];
+  if (use) {
+    const hit = list.find((m) => (m.specialUse || "").toLowerCase() === use.toLowerCase());
+    if (hit) return hit.path;
+    if (use === "\\Inbox") return "INBOX";
+  }
+  const exact = list.find((m) => m.path.toLowerCase() === lower);
+  if (exact) return exact.path;
+  const nested = list.find((m) => {
+    const p = m.path.toLowerCase();
+    return p.endsWith("." + lower) || p.endsWith("/" + lower);
+  });
+  return nested ? nested.path : null;
+}
+
 export function registerImapTools(server: McpServer, accounts: Accounts) {
   const hint = accounts.hint();
 
@@ -302,6 +361,75 @@ export function registerImapTools(server: McpServer, accounts: Accounts) {
         } finally {
           box.release();
         }
+      });
+    }
+  );
+
+  server.tool(
+    "move_emails",
+    `Move one or more emails (by UID) to another folder. ${hint}`,
+    moveSchema.shape,
+    async ({ account, uids, mailbox, destination }: z.infer<typeof moveSchema>) => {
+      const box = mailbox || "INBOX";
+      return withAccountImap(accounts, account, async (client) => {
+        const dest = await resolveMailbox(client, destination);
+        if (!dest) {
+          return textResult(`Folder "${destination}" not found. Check list_folders or create it with create_folder.`);
+        }
+        const lock = await client.getMailboxLock(box);
+        try {
+          const res = await client.messageMove(uids.join(","), dest, { uid: true });
+          if (!res) return textResult(`Move failed — no messages moved from "${box}" (check the UIDs).`);
+          const moved = res.uidMap ? res.uidMap.size : uids.length;
+          return textResult(`Moved ${moved} message(s) from "${box}" to "${dest}".`);
+        } finally {
+          lock.release();
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "delete_emails",
+    `Delete one or more emails by UID. Moves them to the Trash folder by default; permanent=true deletes for good and cannot be undone — confirm with the user before using it. ${hint}`,
+    deleteSchema.shape,
+    async ({ account, uids, mailbox, permanent }: z.infer<typeof deleteSchema>) => {
+      const box = mailbox || "INBOX";
+      return withAccountImap(accounts, account, async (client) => {
+        const trash = await resolveMailbox(client, "trash");
+        const lock = await client.getMailboxLock(box);
+        try {
+          if (!permanent) {
+            if (!trash) return textResult(`No Trash folder found. Pass permanent=true to delete for good.`);
+            if (trash.toLowerCase() === box.toLowerCase()) {
+              return textResult(`Messages are already in "${box}". Pass permanent=true to delete them for good.`);
+            }
+            const res = await client.messageMove(uids.join(","), trash, { uid: true });
+            if (!res) return textResult(`Delete failed — nothing moved from "${box}" (check the UIDs).`);
+            return textResult(`Moved ${res.uidMap ? res.uidMap.size : uids.length} message(s) to "${trash}".`);
+          }
+          const ok = await client.messageDelete(uids.join(","), { uid: true });
+          return textResult(
+            ok ? `Permanently deleted ${uids.length} message(s) from "${box}".` : `Delete failed (check the UIDs).`
+          );
+        } finally {
+          lock.release();
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "create_folder",
+    `Create a new mail folder. ${hint}`,
+    createFolderSchema.shape,
+    async ({ account, path }: z.infer<typeof createFolderSchema>) => {
+      return withAccountImap(accounts, account, async (client) => {
+        // Some servers (e.g. T-Online) only allow folders below their namespace prefix ("INBOX.").
+        const prefix: string = (client as any).namespace?.prefix || "";
+        const full = prefix && !path.toLowerCase().startsWith(prefix.toLowerCase()) ? prefix + path : path;
+        const res = await client.mailboxCreate(full);
+        return textResult(res.created ? `Created folder "${res.path}".` : `Folder "${res.path}" already exists.`);
       });
     }
   );

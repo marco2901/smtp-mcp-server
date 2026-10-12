@@ -15,6 +15,9 @@ An MCP (Model Context Protocol) server for **reading (IMAP)** and **sending (SMT
 | `mark_as_read` / `mark_as_unread` | Toggle a message's read state by UID |
 | `list_attachments` | List a message's attachments with a 1-based index |
 | `get_attachment` | Download an attachment by UID — returns a short-lived one-time HTTPS link (served from `GET /files/:token`) |
+| `move_emails` | Move one or more messages (UIDs) to a folder — a path from `list_folders` or an alias (`inbox`, `archive`, `trash`, `junk`, `sent`, `drafts`) resolved via IMAP special-use flags |
+| `delete_emails` | Move messages to the Trash folder; `permanent=true` deletes for good |
+| `create_folder` | Create a folder (the server's namespace prefix, e.g. `INBOX.`, is added automatically) |
 | `verify_imap_connection` | Check that the IMAP server is reachable and credentials are valid |
 
 **Sending (SMTP)** — enabled when `SMTP_*` is configured:
