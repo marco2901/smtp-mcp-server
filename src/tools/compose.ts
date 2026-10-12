@@ -6,6 +6,7 @@ import { simpleParser } from "mailparser";
 import { z } from "zod/v3";
 import { ImapConfig, withClient } from "./imap";
 import { SmtpConfig } from "./email";
+import { attachmentInputSchema, toNodemailerAttachments } from "../attach-input";
 
 export interface ComposeConfig {
   imap: ImapConfig;
@@ -107,6 +108,7 @@ const replySchema = z.object({
   to: z.string().optional().describe("Override To recipients (comma-separated). Default: original sender."),
   cc: z.string().optional().describe("Override Cc recipients (comma-separated)."),
   from_name: z.string().optional().describe("Sender display name."),
+  attachments: attachmentInputSchema,
 });
 
 const forwardSchema = z.object({
@@ -117,6 +119,7 @@ const forwardSchema = z.object({
   send: z.boolean().optional().describe("true = send immediately. false (default) = save a draft for review."),
   cc: z.string().optional().describe("Cc recipients (comma-separated)."),
   from_name: z.string().optional().describe("Sender display name."),
+  attachments: attachmentInputSchema.describe("Extra files to attach, in addition to the forwarded original's attachments."),
 });
 
 const draftSchema = z.object({
@@ -127,6 +130,7 @@ const draftSchema = z.object({
   cc: z.string().optional().describe("Cc recipients (comma-separated)"),
   bcc: z.string().optional().describe("Bcc recipients (comma-separated)"),
   from_name: z.string().optional().describe("Sender display name"),
+  attachments: attachmentInputSchema,
 });
 
 const sendDraftSchema = z.object({
@@ -158,7 +162,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
     "reply_email",
     "Reply to an email by UID — preserves the thread (In-Reply-To/References) and quotes the original. Saves a draft by default; pass send=true to send immediately.",
     replySchema.shape,
-    async ({ uid, body, mailbox, reply_all, send, to, cc, from_name }: z.infer<typeof replySchema>) => {
+    async ({ uid, body, mailbox, reply_all, send, to, cc, from_name, attachments }: z.infer<typeof replySchema>) => {
       const box = mailbox || "INBOX";
       return withClient(cfg.imap, async (client) => {
         const orig = await fetchParsed(client, box, uid);
@@ -189,6 +193,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
           inReplyTo: p.messageId,
           references: refs.join(" "),
           text: `${body}\n\n${quoteOriginal(p)}`,
+          attachments: toNodemailerAttachments(attachments),
         };
 
         if (send) {
@@ -212,7 +217,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
     "forward_email",
     "Forward an email by UID to new recipients, including the original body and attachments. Saves a draft by default; pass send=true to send immediately.",
     forwardSchema.shape,
-    async ({ uid, to, body, mailbox, send, cc, from_name }: z.infer<typeof forwardSchema>) => {
+    async ({ uid, to, body, mailbox, send, cc, from_name, attachments }: z.infer<typeof forwardSchema>) => {
       const box = mailbox || "INBOX";
       return withClient(cfg.imap, async (client) => {
         const orig = await fetchParsed(client, box, uid);
@@ -226,11 +231,12 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
           `Date: ${p.date ? new Date(p.date).toString() : ""}\n` +
           `Subject: ${p.subject || ""}\n` +
           `To: ${addrString(addrList(p.to))}\n\n`;
-        const attachments = (p.attachments || []).map((a: any) => ({
+        const originalAttachments = (p.attachments || []).map((a: any) => ({
           filename: a.filename || "attachment",
           content: a.content,
           contentType: a.contentType,
         }));
+        const extraAttachments = toNodemailerAttachments(attachments) || [];
 
         const mail: Record<string, unknown> = {
           from: fromHeader(from_name),
@@ -239,7 +245,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
           subject,
           references: [p.references, p.messageId].flat().filter(Boolean).join(" "),
           text: `${body ? body + "\n\n" : ""}${header}${p.text || (p.html ? stripHtml(p.html) : "")}`,
-          attachments,
+          attachments: [...originalAttachments, ...extraAttachments],
         };
 
         if (send) {
@@ -261,7 +267,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
     "draft_email",
     "Create and save a new email draft to the Drafts folder (does not send). Send it later with send_draft.",
     draftSchema.shape,
-    async ({ to, subject, body, html, cc, bcc, from_name }: z.infer<typeof draftSchema>) => {
+    async ({ to, subject, body, html, cc, bcc, from_name, attachments }: z.infer<typeof draftSchema>) => {
       return withClient(cfg.imap, async (client) => {
         const mail: Record<string, unknown> = {
           from: fromHeader(from_name),
@@ -271,6 +277,7 @@ export function registerComposeTools(server: McpServer, cfg: ComposeConfig) {
           subject,
           text: body,
           html,
+          attachments: toNodemailerAttachments(attachments),
         };
         const drafts = await resolveFolder(client, "\\Drafts", DRAFT_FALLBACKS);
         const res = await client.append(drafts, await buildRaw(mail), ["\\Draft"]);

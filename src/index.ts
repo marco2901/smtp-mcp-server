@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { registerEmailTools } from "./tools/email";
 import { registerImapTools } from "./tools/imap";
 import { registerComposeTools } from "./tools/compose";
+import { registerAttachmentTools, registerAttachmentRoute } from "./tools/attachments";
 import { registerOAuthDiscovery, wwwAuthenticate, OAuthDiscoveryConfig } from "./oauth";
 const { version } = require("../package.json") as { version: string };
 
@@ -135,6 +136,8 @@ Reading (IMAP)${imapEnabled ? "" : " — DISABLED (no IMAP config)"}:
 - search_emails: Search by sender, recipient, subject, body, date range, or unread state
 - list_folders: List all available mailboxes/folders
 - mark_as_read / mark_as_unread: Toggle the read state of a message
+- list_attachments: List a message's attachments (with an index)
+- get_attachment: Download an attachment by UID — returns a short-lived one-time HTTPS link
 - verify_imap_connection: Check that IMAP is reachable and credentials are valid
 
 Sending (SMTP)${smtpEnabled ? "" : " — DISABLED (no SMTP config)"}:
@@ -149,52 +152,46 @@ Replying / forwarding${smtpEnabled && imapEnabled ? "" : " — DISABLED (needs b
 
 reply_email/forward_email/draft_email SAVE A DRAFT by default — review it, then send with send_draft. Pass send=true to send in one step. Prefer reply_email over send_email when responding, so the recipient keeps the conversation history.
 
+Attachments: send_email/reply_email/forward_email/draft_email accept an "attachments" array; give each file as a URL (preferred — e.g. a Paperless or OneDrive link) or as base64. To hand the user a file FROM an email, use get_attachment (returns a one-time download link).
+
 ${smtpEnabled ? `Default sender address: ${smtpFrom}\n` : ""}UIDs come from list_emails/search_emails and are stable per mailbox — pass them to read_email/reply_email/forward_email/mark_as_read.
 Always confirm the recipient and content with the user before sending.
       `.trim(),
     }
   );
 
+  const smtpCfg = {
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpSecure,
+    user: smtpUser,
+    pass: smtpPass,
+    from: smtpFrom,
+  };
+  const imapCfg = {
+    host: imapHost,
+    port: imapPort,
+    secure: imapSecure,
+    user: imapUser,
+    pass: imapPass,
+  };
+
   if (smtpEnabled) {
-    registerEmailTools(server, {
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpSecure,
-      user: smtpUser,
-      pass: smtpPass,
-      from: smtpFrom,
-    });
+    registerEmailTools(server, smtpCfg);
   }
 
   // Reply / forward / draft need both reading (fetch original, save drafts) and sending.
   if (smtpEnabled && imapEnabled) {
-    registerComposeTools(server, {
-      imap: {
-        host: imapHost,
-        port: imapPort,
-        secure: imapSecure,
-        user: imapUser,
-        pass: imapPass,
-      },
-      smtp: {
-        host: smtpHost,
-        port: smtpPort,
-        secure: smtpSecure,
-        user: smtpUser,
-        pass: smtpPass,
-        from: smtpFrom,
-      },
-    });
+    registerComposeTools(server, { imap: imapCfg, smtp: smtpCfg });
+  }
+
+  // Attachment download tools need a public base URL to hand out download links.
+  if (imapEnabled && publicBaseUrl) {
+    registerAttachmentTools(server, { imap: imapCfg, publicBaseUrl });
   }
 
   if (imapEnabled) {
-    registerImapTools(server, {
-      host: imapHost,
-      port: imapPort,
-      secure: imapSecure,
-      user: imapUser,
-      pass: imapPass,
-    });
+    registerImapTools(server, imapCfg);
   }
 
   if (useHttp) {
@@ -206,6 +203,12 @@ Always confirm the recipient and content with the user before sending.
     // Public OAuth discovery endpoints — MUST be before the auth middleware.
     if (oauthConfig) {
       registerOAuthDiscovery(app, oauthConfig);
+    }
+
+    // Public one-time attachment download links — also before the auth middleware
+    // (the token in the URL is the capability; Claude.ai/browsers fetch it unauthenticated).
+    if (imapEnabled && publicBaseUrl) {
+      registerAttachmentRoute(app);
     }
 
     app.use(authMiddleware);

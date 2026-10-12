@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import nodemailer from "nodemailer";
 import { z } from "zod/v3";
+import { attachmentInputSchema, toNodemailerAttachments } from "../attach-input";
 
 export interface SmtpConfig {
   host: string;
@@ -20,6 +21,7 @@ const sendEmailSchema = z.object({
   bcc: z.string().optional().describe("BCC recipients (comma-separated)"),
   reply_to: z.string().optional().describe("Reply-To address"),
   from_name: z.string().optional().describe("Sender display name"),
+  attachments: attachmentInputSchema,
 });
 
 type SendEmailInput = z.infer<typeof sendEmailSchema>;
@@ -39,7 +41,7 @@ export function registerEmailTools(server: McpServer, config: SmtpConfig) {
     "send_email",
     "Send an email via SMTP",
     sendEmailSchema.shape,
-    async ({ to, subject, body, html, cc, bcc, reply_to, from_name }: SendEmailInput) => {
+    async ({ to, subject, body, html, cc, bcc, reply_to, from_name, attachments }: SendEmailInput) => {
       const from = from_name
         ? `"${from_name}" <${config.from}>`
         : config.from;
@@ -53,6 +55,7 @@ export function registerEmailTools(server: McpServer, config: SmtpConfig) {
         subject,
         text: body,
         html,
+        attachments: toNodemailerAttachments(attachments),
       });
 
       return {
